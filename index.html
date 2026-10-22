@@ -504,6 +504,8 @@ const DB = {
   saveDietTargets:v=>W('ll_diet_targets',v),
   settings:()=>R('ll_settings',{dark:true}),
   saveSettings:v=>W('ll_settings',v),
+  sheetUrl:()=>R('ll_sheet_url',''),
+  saveSheetUrl:v=>W('ll_sheet_url',v),
 };
 
 // ─────────────────────────────────────────────
@@ -519,6 +521,8 @@ const S = {
   progEx:null,
   elapsed:0, elIv:null,
   dietDate: null,  // date being viewed in diet tab
+  sheetUrl: '',
+  userName: 'Rohit More',
 };
 
 // ─────────────────────────────────────────────
@@ -907,6 +911,27 @@ function getPrevSets(libId){
   return ex?ex.sets:[];
 }
 
+
+async function syncToGoogleSheet(action, payload){
+  const url = S.sheetUrl || DB.sheetUrl();
+  if(!url) return;
+  try {
+    const body = JSON.stringify({
+      user: S.userName || 'User',
+      action: action,
+      timestamp: new Date().toISOString(),
+      payload: payload
+    });
+    await fetch(url, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: body
+    });
+  } catch(e) {
+    console.error('Sheet sync error', e);
+  }
+}
 async function finishWorkout(){
   const draft=S.draft;if(!draft)return;
   const done=draft.exercises.reduce((a,e)=>a+e.sets.filter(s=>s.status==='done').length,0);
@@ -920,6 +945,7 @@ async function finishWorkout(){
   S.draft=null;DB.clearDraft();
   if(S.elIv)clearInterval(S.elIv);S.elapsed=0;
   toast('Workout saved! 🎉');
+  syncToGoogleSheet('workout', session);
   renderTrain();renderHistory();renderProgress();
 }
 
@@ -1208,7 +1234,7 @@ function logBw(){
   const today=ds();
   S.bw=S.bw.filter(b=>b.date!==today);
   S.bw.push({date:today,weight:val});
-  DB.saveBw(S.bw);toast('Logged!');renderBody();
+  DB.saveBw(S.bw);toast('Logged!');syncToGoogleSheet('bodyweight', {date:today, weight:val});renderBody();
 }
 async function deleteBw(date){
   const ok=await confirm('Remove this entry?','',`Remove`,'d');
@@ -1238,6 +1264,7 @@ function getDietTotals(entries){
 function renderDiet(){
   const el=document.getElementById('pg-diet');
   if(!S.dietDate)S.dietDate=ds();
+  S.sheetUrl=DB.sheetUrl();
   const date=S.dietDate;
   const entries=getDietEntries(date);
   const totals=getDietTotals(entries);
@@ -1467,6 +1494,7 @@ function addFoodToDiet(foodId){
     addedAt:Date.now(),
   });
   saveDietEntries(date,entries);
+  syncToGoogleSheet('diet', entries[entries.length-1]);
   closeModal();renderDiet();
   toast(`${f.name} added ✓`);
 }
@@ -1502,6 +1530,7 @@ function addCustomFoodToDiet(){
   const entries=getDietEntries(date);
   entries.push({foodId:'custom_'+uid(),name,icon:'🍽',grams:g,p,c,f,fi,cal,addedAt:Date.now()});
   saveDietEntries(date,entries);
+  syncToGoogleSheet('diet', entries[entries.length-1]);
   closeModal();renderDiet();toast(`${name} added ✓`);
 }
 
@@ -1664,7 +1693,25 @@ function renderBackup(){
   const today=ds();
   const d15=new Date();d15.setDate(d15.getDate()-15);
   const d15s=d15.toISOString().slice(0,10);
+  const isLinked = !!(S.sheetUrl);
   el.innerHTML=`
+    <div class="bk-card" style="border: 1.5px solid var(--accent)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="bk-title" style="margin:0">☁️ Google Drive & Sheet Sync</div>
+        <span class="badge ${isLinked?'bg':'bx'}">${isLinked?'Connected':'Not linked'}</span>
+      </div>
+      <div class="bk-desc">Every workout, daily weight, and meal automatically saves into your personal Google Sheet in Google Drive.</div>
+      <div class="fg" style="margin-bottom:12px">
+        <label>Google Apps Script Webhook URL</label>
+        <input type="url" id="sheet-url-inp" value="${S.sheetUrl||''}" placeholder="https://script.google.com/macros/s/.../exec">
+      </div>
+      <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+        <button class="btn p sm" style="flex:1" onclick="saveAndTestSheet()">Save & Test Link</button>
+        <button class="btn s sm" style="flex:1" onclick="syncAllToSheet()">Sync All History</button>
+      </div>
+      <button class="btn g w xs" onclick="openSheetGuideModal()">📖 How to get your Google Sheet Link (1 min guide)</button>
+    </div>
+
     <div class="bk-card">
       <div class="bk-title">Export report for ChatGPT</div>
       <div class="bk-desc">Set a date range, preview the report, then copy or download it.</div>
@@ -1691,6 +1738,168 @@ function renderBackup(){
       <div class="bk-desc">Clear all sessions, bodyweight and diet data permanently.</div>
       <button class="btn d sm" onclick="clearAll()">Clear all data</button>
     </div>`;
+}
+
+
+function saveAndTestSheet(){
+  const inp = document.getElementById('sheet-url-inp');
+  const url = (inp ? inp.value : '').trim();
+  if(!url){
+    toast('Please paste a Webhook URL');
+    return;
+  }
+  S.sheetUrl = url;
+  DB.saveSheetUrl(url);
+  toast('Testing connection...');
+  syncToGoogleSheet('ping', { test: true });
+  setTimeout(() => {
+    toast('Connected to Google Sheet! ✓');
+    renderBackup();
+  }, 900);
+}
+
+async function syncAllToSheet(){
+  if(!S.sheetUrl){
+    toast('Set up Google Sheet link first');
+    return;
+  }
+  toast('Syncing all history...');
+  await syncToGoogleSheet('full_sync', {
+    sessions: S.sessions,
+    bw: S.bw,
+    diet: S.diet
+  });
+  toast('All history synced to Sheet! ✓');
+}
+
+function openSheetGuideModal(){
+  const scriptCode = `function doPost(e) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var data = JSON.parse(e.postData.contents);
+    var action = data.action;
+    var payload = data.payload;
+    var user = data.user || 'User';
+
+    if (action === 'workout') {
+      logWorkout(ss, user, payload);
+    } else if (action === 'diet') {
+      logDiet(ss, user, payload);
+    } else if (action === 'bodyweight') {
+      logBodyweight(ss, user, payload);
+    } else if (action === 'full_sync') {
+      if (payload.sessions && payload.sessions.length) {
+        payload.sessions.forEach(function(s) { logWorkout(ss, user, s); });
+      }
+      if (payload.bw && payload.bw.length) {
+        payload.bw.forEach(function(b) { logBodyweight(ss, user, b); });
+      }
+      if (payload.diet) {
+        Object.keys(payload.diet).forEach(function(date) {
+          (payload.diet[date] || []).forEach(function(d) {
+            d.date = d.date || date;
+            logDiet(ss, user, d);
+          });
+        });
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({ status: 'success' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: 'error', message: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function getOrCreateSheet(ss, name, headers) {
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.appendRow(headers);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#222222').setFontColor('#ffffff');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function logWorkout(ss, user, s) {
+  var sheet = getOrCreateSheet(ss, 'Workouts', ['Date', 'User', 'Session Name', 'Duration (min)', 'Bodyweight (kg)', 'Sleep (hrs)', 'Energy (1-5)', 'Soreness', 'Notes', 'Total Sets', 'Details']);
+  var setsDone = 0;
+  var summary = [];
+  if (s.exercises) {
+    s.exercises.forEach(function(ex) {
+      var exSets = [];
+      ex.sets.forEach(function(st, idx) {
+        if (st.status === 'done') {
+          setsDone++;
+          exSets.push('Set ' + (idx+1) + ': ' + (st.weight||0) + 'kg x ' + (st.reps||0) + 'r');
+        }
+      });
+      if (exSets.length) {
+        summary.push(ex.name + ' [' + exSets.join(', ') + ']');
+      }
+    });
+  }
+  sheet.appendRow([
+    s.date || '',
+    user,
+    s.name || 'Workout',
+    s.duration || '',
+    s.bodyweight || '',
+    s.sleep || '',
+    s.energy || '',
+    s.soreness || '',
+    s.notes || '',
+    setsDone,
+    summary.join(' | ')
+  ]);
+}
+
+function logDiet(ss, user, d) {
+  var sheet = getOrCreateSheet(ss, 'Diet', ['Date', 'User', 'Food Name', 'Grams', 'Calories (kcal)', 'Protein (g)', 'Carbs (g)', 'Fat (g)', 'Fiber (g)', 'Logged At']);
+  sheet.appendRow([
+    d.date || new Date().toISOString().slice(0, 10),
+    user,
+    d.name || '',
+    d.grams || 100,
+    d.cal || 0,
+    d.p || 0,
+    d.c || 0,
+    d.f || 0,
+    d.fi || 0,
+    new Date().toLocaleString()
+  ]);
+}
+
+function logBodyweight(ss, user, b) {
+  var sheet = getOrCreateSheet(ss, 'Bodyweight', ['Date', 'User', 'Weight (kg)', 'Logged At']);
+  sheet.appendRow([
+    b.date || new Date().toISOString().slice(0, 10),
+    user,
+    b.weight || '',
+    new Date().toLocaleString()
+  ]);
+}`;
+
+  openModal('Google Sheet Setup (1 Min)', `
+    <div class="mb">
+      <div style="font-size:13px;color:var(--text2);line-height:1.7;margin-bottom:14px">
+        <strong>Step 1:</strong> Open <a href="https://sheets.new" target="_blank" style="color:var(--accent)">sheets.new</a> in your browser.<br>
+        <strong>Step 2:</strong> In the top menu, click <strong>Extensions > Apps Script</strong>.<br>
+        <strong>Step 3:</strong> Delete whatever is in the editor, and paste the code below.<br>
+        <strong>Step 4:</strong> Click <strong>Deploy > New deployment</strong>.<br>
+        <strong>Step 5:</strong> Select type: <strong>Web app</strong>.<br>
+        &bull; Execute as: <strong>Me</strong><br>
+        &bull; Who has access: <strong>Anyone</strong><br>
+        <strong>Step 6:</strong> Click <strong>Deploy</strong>, grant permission, copy the <strong>Web App URL</strong>, and paste it in the box above!
+      </div>
+      <div class="fg">
+        <label>Apps Script Code</label>
+        <textarea id="as-code-txt" readonly style="height:150px;font-family:monospace;font-size:11px">${scriptCode}</textarea>
+      </div>
+      <button class="btn p w sm" onclick="navigator.clipboard.writeText(document.getElementById('as-code-txt').value).then(()=>toast('Code copied! ✓'))">Copy Script Code</button>
+    </div>
+  `, `<button class="btn g w" onclick="closeModal()">Close</button>`);
 }
 
 function previewRep(){
